@@ -19,18 +19,18 @@ const int encLeftPin  = 17;
 const int encRightPin = 18;
 
 const int sharedTrig = 10;
-const int echoFront  = 11;   // Front ultrasonic
-const int echoLeft   = 12;   // Left ultrasonic
-const int echoRight  = 13;   // Right ultrasonic
+const int echoFront  = 11;
+const int echoLeft   = 12;
+const int echoRight  = 13;
 
 // ─────────────────────────────────────────────────────────────
-// TUNABLE PARAMETERS — adjust these to suit your robot
+// TUNABLE PARAMETERS
 // ─────────────────────────────────────────────────────────────
-const int   DRIVE_SPEED        = 80;  // PWM for forward driving
-const int   PIVOT_SPEED        = 80;   // PWM for pivot turns
-const long  OBSTACLE_DIST_CM   = 7;   // Stop & decide if front < this (cm)
-const long  SIDE_CLEAR_CM      = 5;   // Side is "blocked" if < this (cm)
-const long  SONAR_TIMEOUT_US   = 20000;// pulseIn timeout (≈340 cm max range)
+const int   DRIVE_SPEED      = 90;  // PWM for forward driving
+const int   PIVOT_SPEED      = 90;   // PWM for pivot turns
+const long  OBSTACLE_DIST_CM = 9;   // stop if front closer than this
+const long  SIDE_CLEAR_CM    = 7;   // side "blocked" if closer than this
+const long  SONAR_TIMEOUT_US = 20000;
 
 // ─────────────────────────────────────────────────────────────
 // VARIABLES
@@ -38,13 +38,11 @@ const long  SONAR_TIMEOUT_US   = 20000;// pulseIn timeout (≈340 cm max range)
 volatile long leftTicks  = 0;
 volatile long rightTicks = 0;
 
-// Gyroscope
 float         gyroAngle    = 0.0;
 unsigned long lastGyroTime = 0;
 float         gyroBiasZ    = 0.0;
 float         gyroSign     = 1.0;
 
-// Wheel / encoder parameters
 const float WHEEL_DIAMETER_CM      = 6.5;
 const float WHEEL_CIRCUMFERENCE_CM = 3.14159 * WHEEL_DIAMETER_CM;
 const float WHEEL_BASE_CM          = 12.5;
@@ -54,7 +52,6 @@ const float ENCODER_RESOLUTION_MM  = 0.01;
 const float SLOT_WIDTH_MM          = 6.0;
 const float MEASURED_TICKS_PER_CM  = 400.0;
 
-// INTERRUPTS
 void IRAM_ATTR countLeft()  { leftTicks++; }
 void IRAM_ATTR countRight() { rightTicks++; }
 
@@ -83,14 +80,11 @@ void setRightMotor(int speed, int direction) {
   else                    { digitalWrite(rightIN3, LOW);  digitalWrite(rightIN4, LOW);  }
 }
 
-void moveForward(int speed)  { setLeftMotor(speed, 1);  setRightMotor(speed, 1);  }
-void moveBackward(int speed) { setLeftMotor(speed, -1); setRightMotor(speed, -1); }
+void moveForward(int speed) { setLeftMotor(speed, 1); setRightMotor(speed, 1); }
+void pivotLeft(int speed)   { setLeftMotor(speed, -1); setRightMotor(speed, 1);  }
+void pivotRight(int speed)  { setLeftMotor(speed, 1);  setRightMotor(speed, -1); }
 
-// Center-pivot — robot spins on its own center point
-void pivotLeft(int speed)  { setLeftMotor(speed, -1); setRightMotor(speed, 1);  }
-void pivotRight(int speed) { setLeftMotor(speed, 1);  setRightMotor(speed, -1); }
-
-// Kill PWM first to prevent ghost current
+// Kill PWM first — no ghost current
 void stopMotors() {
   analogWrite(leftENA,  0);
   analogWrite(rightENB, 0);
@@ -108,32 +102,22 @@ void calibrateGyro() {
   Serial.println("Measuring for 3 seconds...");
   Serial.println("========================================\n");
 
-  float sumZ = 0.0;
-  int   samples = 0;
+  float sumZ = 0.0; int samples = 0;
   unsigned long startTime = millis();
-
   while (millis() - startTime < 3000) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
-    sumZ += g.gyro.z;
-    samples++;
-    delay(10);
+    sumZ += g.gyro.z; samples++; delay(10);
   }
-
   gyroBiasZ = sumZ / samples;
   Serial.print("Gyro Z Bias: "); Serial.print(gyroBiasZ, 6); Serial.println(" rad/s");
   Serial.println("Calibration complete!\n");
 }
 
 void determineGyroSign() {
-  Serial.println("\n========================================");
   Serial.println("GYRO SIGN CHECK — pivot-left briefly...");
-  Serial.println("========================================\n");
-
-  stopMotors();
-  delay(200);
-  gyroAngle    = 0.0;
-  lastGyroTime = millis();
+  stopMotors(); delay(200);
+  gyroAngle = 0.0; lastGyroTime = millis();
 
   pivotLeft(100);
   unsigned long startTime = millis();
@@ -145,103 +129,63 @@ void determineGyroSign() {
     lastGyroTime = now;
     gyroAngle += ((g.gyro.z - gyroBiasZ) * 180.0 / 3.14159) * dt;
   }
+  stopMotors(); delay(300);
 
-  stopMotors();
-  delay(300);
-
-  Serial.print("Gyro angle after pivot-left: ");
-  Serial.print(gyroAngle, 2); Serial.println("°");
   gyroSign = (gyroAngle < 0) ? -1.0 : 1.0;
   Serial.println(gyroSign < 0 ? "Gyro sign inverted." : "Gyro sign normal.");
-
-  gyroAngle    = 0.0;
-  lastGyroTime = millis();
+  gyroAngle = 0.0; lastGyroTime = millis();
 }
 
 void updateGyroAngle() {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
-
   unsigned long currentTime = millis();
   if (lastGyroTime == 0) { lastGyroTime = currentTime; return; }
-
-  float dt         = (currentTime - lastGyroTime) / 1000.0;
-  lastGyroTime     = currentTime;
+  float dt = (currentTime - lastGyroTime) / 1000.0;
+  lastGyroTime = currentTime;
   float correctedZ = (g.gyro.z - gyroBiasZ) * gyroSign;
-  gyroAngle       += (correctedZ * 180.0 / 3.14159) * dt;
+  gyroAngle += (correctedZ * 180.0 / 3.14159) * dt;
 }
 
-// ─────────────────────────────────────────────────────────────
-// TRACKING HELPERS
-// ─────────────────────────────────────────────────────────────
-
 void resetTracking() {
-  gyroAngle    = 0.0;
-  lastGyroTime = millis();
-  leftTicks    = 0;
-  rightTicks   = 0;
+  gyroAngle = 0.0; lastGyroTime = millis();
+  leftTicks = 0;   rightTicks = 0;
 }
 
 // ─────────────────────────────────────────────────────────────
 // BLOCKING PIVOT (gyro-controlled)
 // Positive angle = left, negative = right
-// Resets gyro to zero before each pivot — always accurate
 // ─────────────────────────────────────────────────────────────
 void blockingPivot(float targetAngle, int speed) {
   resetTracking();
   unsigned long startTime = millis();
-
-  Serial.print("[PIVOT] Targeting "); Serial.print(targetAngle, 1); Serial.println("°");
+  Serial.print("[PIVOT] "); Serial.print(targetAngle > 0 ? "LEFT " : "RIGHT ");
+  Serial.print(abs(targetAngle), 0); Serial.println("°");
 
   while (true) {
     updateGyroAngle();
-
-    if (millis() - startTime > 5000) {
-      Serial.println("[TIMEOUT] Pivot timeout!");
-      stopMotors();
-      return;
-    }
-
-    float angleDiff = targetAngle - gyroAngle;
-
-    if (abs(angleDiff) < 5.0) {
-      stopMotors();
-      Serial.print("[PIVOT] Done. Final angle: "); Serial.print(gyroAngle, 1); Serial.println("°");
-      return;
-    }
-
-    if (angleDiff > 0) pivotLeft(speed);
-    else               pivotRight(speed);
+    if (millis() - startTime > 5000) { Serial.println("[TIMEOUT]"); stopMotors(); return; }
+    float err = targetAngle - gyroAngle;
+    if (abs(err) < 5.0) { stopMotors(); return; }
+    if (err > 0) pivotLeft(speed); else pivotRight(speed);
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// ULTRASONIC — shared trigger, individual echo pins
-// Returns distance in cm. Returns 999 if no echo (clear path).
-// A small delay between readings prevents cross-talk.
+// ULTRASONIC
 // ─────────────────────────────────────────────────────────────
 long readSonar(int echoPin) {
-  // Ensure trigger is clean before firing
+  digitalWrite(sharedTrig, LOW);  delayMicroseconds(4);
+  digitalWrite(sharedTrig, HIGH); delayMicroseconds(10);
   digitalWrite(sharedTrig, LOW);
-  delayMicroseconds(4);
-  digitalWrite(sharedTrig, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(sharedTrig, LOW);
-
   long duration = pulseIn(echoPin, HIGH, SONAR_TIMEOUT_US);
-  if (duration == 0) return 999;
-  return duration * 0.034 / 2;
+  return (duration == 0) ? 999 : duration * 0.034 / 2;
 }
 
-// Read all three sensors with a small gap between each to avoid cross-talk
-struct SonarReadings {
-  long front;
-  long left;
-  long right;
-};
+struct Sonars { long front, left, right; };
 
-SonarReadings readAllSonars() {
-  SonarReadings s;
+Sonars readAllSonars() {
+  Sonars s;
   s.front = readSonar(echoFront); delayMicroseconds(300);
   s.left  = readSonar(echoLeft);  delayMicroseconds(300);
   s.right = readSonar(echoRight); delayMicroseconds(300);
@@ -249,142 +193,92 @@ SonarReadings readAllSonars() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// OBSTACLE AVOIDANCE STATE MACHINE
+// FIND FREE WAY  — no backward movement ever
 //
-// States:
-//   FORWARD  — drive forward until front obstacle detected
-//   DECIDE   — stop, read left/right, choose turn direction
-//   TURN     — pivot 90° in chosen direction
-//   BACKUP   — back up briefly if all three sides blocked
+// Called immediately when front obstacle detected.
+// Robot is stopped. Logic:
+//
+//   1. Read all 3 sensors
+//   2. If left clear  → pivot 90° left,  check front again
+//   3. If right clear → pivot 90° right, check front again
+//   4. If both clear  → pick side with more space
+//   5. If all 3 blocked → keep pivoting LEFT in 45° steps
+//      until front is clear (full 360° scan if needed)
+//      Robot never moves backward — only rotates in place.
 // ─────────────────────────────────────────────────────────────
+void findFreeWay() {
+  Serial.println("\n[SCAN] Obstacle detected — finding free way...");
 
-enum RobotState { FORWARD, DECIDE, TURN_LEFT, TURN_RIGHT, BACKUP };
+  Sonars s = readAllSonars();
+  Serial.print("[SCAN] F:"); Serial.print(s.front);
+  Serial.print(" L:");       Serial.print(s.left);
+  Serial.print(" R:");       Serial.print(s.right); Serial.println("cm");
 
-RobotState state = FORWARD;
-
-void loop() {
-  updateGyroAngle();
-
-  SonarReadings s = readAllSonars();
-
-  // Live debug every 500 ms
-  static unsigned long lastPrint = 0;
-  if (millis() - lastPrint >= 500) {
-    lastPrint = millis();
-    Serial.print("[SONAR] F:"); Serial.print(s.front);
-    Serial.print("cm L:");      Serial.print(s.left);
-    Serial.print("cm R:");      Serial.print(s.right);
-    Serial.print("cm | State: ");
-    switch(state) {
-      case FORWARD:    Serial.println("FORWARD");    break;
-      case DECIDE:     Serial.println("DECIDE");     break;
-      case TURN_LEFT:  Serial.println("TURN_LEFT");  break;
-      case TURN_RIGHT: Serial.println("TURN_RIGHT"); break;
-      case BACKUP:     Serial.println("BACKUP");     break;
-    }
+  // ── Case 1: front already cleared (e.g. moving obstacle) ─
+  if (s.front >= OBSTACLE_DIST_CM) {
+    Serial.println("[SCAN] Front cleared — no turn needed.");
+    return;
   }
 
-  switch (state) {
+  // ── Case 2: one or both sides open ───────────────────────
+  bool leftClear  = (s.left  >= SIDE_CLEAR_CM);
+  bool rightClear = (s.right >= SIDE_CLEAR_CM);
 
-    // ── FORWARD ──────────────────────────────────────────────
-    // Drive forward. Transition to DECIDE if front is blocked.
-    case FORWARD:
-      moveForward(DRIVE_SPEED);
-      if (s.front < OBSTACLE_DIST_CM) {
-        stopMotors();
-        Serial.println("\n[OBSTACLE] Front blocked! Deciding...");
-        state = DECIDE;
-      }
-      break;
-
-    // ── DECIDE ───────────────────────────────────────────────
-    // Read sides and pick the clearest direction to turn.
-    // If both sides are blocked too → BACKUP first.
-    case DECIDE: {
-      bool leftBlocked  = (s.left  < SIDE_CLEAR_CM);
-      bool rightBlocked = (s.right < SIDE_CLEAR_CM);
-
-      Serial.print("[DECIDE] Left "); Serial.print(leftBlocked  ? "BLOCKED" : "CLEAR");
-      Serial.print(" | Right ");      Serial.println(rightBlocked ? "BLOCKED" : "CLEAR");
-
-      if (!leftBlocked && !rightBlocked) {
-        // Both clear — pick the side with more space
-        if (s.left >= s.right) {
-          Serial.println("[DECIDE] Both clear — turning LEFT (more space)");
-          state = TURN_LEFT;
-        } else {
-          Serial.println("[DECIDE] Both clear — turning RIGHT (more space)");
-          state = TURN_RIGHT;
-        }
-      } else if (!leftBlocked) {
-        Serial.println("[DECIDE] Turning LEFT");
-        state = TURN_LEFT;
-      } else if (!rightBlocked) {
-        Serial.println("[DECIDE] Turning RIGHT");
-        state = TURN_RIGHT;
+  if (leftClear || rightClear) {
+    if (leftClear && rightClear) {
+      // Both open — turn toward side with more space
+      if (s.left >= s.right) {
+        Serial.println("[SCAN] Both clear — turning LEFT (more space)");
+        blockingPivot(90.0, PIVOT_SPEED);
       } else {
-        // All three sides blocked — back up and re-evaluate
-        Serial.println("[DECIDE] All sides blocked! Backing up...");
-        state = BACKUP;
+        Serial.println("[SCAN] Both clear — turning RIGHT (more space)");
+        blockingPivot(-90.0, PIVOT_SPEED);
       }
-      break;
-    }
-
-    // ── TURN LEFT ────────────────────────────────────────────
-    case TURN_LEFT:
+    } else if (leftClear) {
+      Serial.println("[SCAN] LEFT clear — turning LEFT 90°");
       blockingPivot(90.0, PIVOT_SPEED);
-      delay(200);
-      state = FORWARD;
-      break;
-
-    // ── TURN RIGHT ───────────────────────────────────────────
-    case TURN_RIGHT:
+    } else {
+      Serial.println("[SCAN] RIGHT clear — turning RIGHT 90°");
       blockingPivot(-90.0, PIVOT_SPEED);
-      delay(200);
-      state = FORWARD;
-      break;
+    }
+    delay(150);
+    return;
+  }
 
-    // ── BACKUP ───────────────────────────────────────────────
-    // Reverse for ~25 cm worth of ticks, then re-evaluate.
-    case BACKUP: {
-      Serial.println("[BACKUP] Reversing...");
-      resetTracking();
-      long targetTicks = (long)(25.0 * MEASURED_TICKS_PER_CM); // 25 cm back
+  // ── Case 3: all 3 blocked — rotate in 45° steps until ───
+  //    front sonar finds a clear path. No backward movement.
+  Serial.println("[SCAN] All blocked — rotating in 45° steps to find gap...");
 
-      moveBackward(DRIVE_SPEED);
-      while (leftTicks < targetTicks && rightTicks < targetTicks) {
-        // Check front is now clear enough before full 25 cm
-        long f = readSonar(echoFront);
-        if (f > OBSTACLE_DIST_CM + 10) break;
-        delay(10);
-      }
-      stopMotors();
-      delay(300);
+  int totalRotated = 0;
+  while (totalRotated < 360) {
+    blockingPivot(45.0, PIVOT_SPEED);   // always pivot left in small steps
+    totalRotated += 45;
+    delay(150);
 
-      // After backing up, turn 180° if completely stuck, else re-decide
-      SonarReadings sr = readAllSonars();
-      if (sr.front < OBSTACLE_DIST_CM && sr.left < SIDE_CLEAR_CM && sr.right < SIDE_CLEAR_CM) {
-        Serial.println("[BACKUP] Still stuck — turning 180°");
-        blockingPivot(180.0, PIVOT_SPEED);
-      }
+    long frontNow = readSonar(echoFront);
+    Serial.print("[SCAN] Rotated "); Serial.print(totalRotated);
+    Serial.print("° | Front: "); Serial.print(frontNow); Serial.println("cm");
 
-      state = FORWARD;
-      break;
+    if (frontNow >= OBSTACLE_DIST_CM) {
+      Serial.println("[SCAN] Gap found — resuming forward.");
+      return;
     }
   }
+
+  // Completed full 360° — front still blocked (very tight space)
+  // Stay in place; next loop iteration will re-trigger findFreeWay
+  Serial.println("[SCAN] Full 360° scanned. Will re-evaluate.");
 }
 
 // ─────────────────────────────────────────────────────────────
 // SETUP
 // ─────────────────────────────────────────────────────────────
-
 void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
   Serial.println("Starting Robot...");
 
   setupMotors();
-  Serial.println("Motors initialized!");
 
   pinMode(encLeftPin,  INPUT_PULLUP);
   pinMode(encRightPin, INPUT_PULLUP);
@@ -399,7 +293,7 @@ void setup() {
 
   Wire.begin(8, 9);
   if (!mpu.begin()) {
-    Serial.println("Failed to find MPU6050! Check I2C wiring.");
+    Serial.println("Failed to find MPU6050!");
     while (1) delay(10);
   }
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
@@ -412,10 +306,49 @@ void setup() {
 
   Serial.println("\n========================================");
   Serial.println("OBSTACLE AVOIDANCE ACTIVE");
-  Serial.print("Stop distance : "); Serial.print(OBSTACLE_DIST_CM); Serial.println("cm");
-  Serial.print("Side clear    : "); Serial.print(SIDE_CLEAR_CM);    Serial.println("cm");
-  Serial.print("Drive PWM     : "); Serial.println(DRIVE_SPEED);
-  Serial.print("Pivot PWM     : "); Serial.println(PIVOT_SPEED);
+  Serial.println("Mode: FORWARD + ROTATE ONLY (no backward)");
+  Serial.print("Obstacle trigger : "); Serial.print(OBSTACLE_DIST_CM); Serial.println("cm");
+  Serial.print("Side clear min   : "); Serial.print(SIDE_CLEAR_CM);    Serial.println("cm");
+  Serial.print("Drive PWM        : "); Serial.println(DRIVE_SPEED);
+  Serial.print("Pivot PWM        : "); Serial.println(PIVOT_SPEED);
   Serial.println("========================================\n");
   delay(500);
+}
+
+// ─────────────────────────────────────────────────────────────
+// LOOP
+//
+//   Every iteration:
+//     1. Read front sonar
+//     2. If clear  → drive forward
+//     3. If blocked → stop + findFreeWay() (rotate only)
+//        → loop resumes, drives forward in new direction
+//
+//   Robot NEVER moves backward.
+// ─────────────────────────────────────────────────────────────
+void loop() {
+  updateGyroAngle();
+
+  long frontDist = readSonar(echoFront);
+
+  // Live status every 500 ms
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint >= 500) {
+    lastPrint = millis();
+    long l = readSonar(echoLeft);  delayMicroseconds(300);
+    long r = readSonar(echoRight);
+    Serial.print("[LIVE] F:"); Serial.print(frontDist);
+    Serial.print("cm L:");     Serial.print(l);
+    Serial.print("cm R:");     Serial.print(r); Serial.println("cm");
+  }
+
+  if (frontDist < OBSTACLE_DIST_CM) {
+    // Obstacle — stop and rotate to find free way
+    stopMotors();
+    findFreeWay();
+    // Loop continues → moveForward() called next iteration
+  } else {
+    // Clear path — drive forward
+    moveForward(DRIVE_SPEED);
+  }
 }
