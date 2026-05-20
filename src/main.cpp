@@ -33,11 +33,10 @@ long distances[5] = {0, 0, 0, 0, 0};
 int  echoPins[5]  = {echoFront, echoLeft, echoRight, echoDownL, echoDownR};
 
 // Gyroscope
-float         gyroAngle     = 0.0;
-unsigned long lastGyroTime  = 0;
-float         gyroBiasZ     = 0.0;
-bool          gyroCalibrated = false;
-float         gyroSign      = 1.0;
+float         gyroAngle    = 0.0;
+unsigned long lastGyroTime = 0;
+float         gyroBiasZ    = 0.0;
+float         gyroSign     = 1.0;
 
 // Wheel / encoder parameters
 const float WHEEL_DIAMETER_CM      = 6.5;
@@ -48,6 +47,10 @@ const int   SLOTS_PER_REVOLUTION   = 20;
 const float ENCODER_RESOLUTION_MM  = 0.01;
 const float SLOT_WIDTH_MM          = 6.0;
 const float MEASURED_TICKS_PER_CM  = 400.0;
+
+// Test configuration
+const int   PIVOT_SPEED      = 80;   // PWM for all pivots
+const int   PAUSE_BETWEEN_MS = 800;  // pause between each pivot step (ms)
 
 // INTERRUPTS
 void IRAM_ATTR countLeft()  { leftTicks++; }
@@ -60,7 +63,6 @@ void IRAM_ATTR countRight() { rightTicks++; }
 void setupMotors() {
   pinMode(leftENA,  OUTPUT); pinMode(leftIN1,  OUTPUT); pinMode(leftIN2,  OUTPUT);
   pinMode(rightENB, OUTPUT); pinMode(rightIN3, OUTPUT); pinMode(rightIN4, OUTPUT);
-  // All LOW — motors fully off, no ghost current
   digitalWrite(leftENA,  LOW); digitalWrite(leftIN1,  LOW); digitalWrite(leftIN2,  LOW);
   digitalWrite(rightENB, LOW); digitalWrite(rightIN3, LOW); digitalWrite(rightIN4, LOW);
 }
@@ -79,33 +81,27 @@ void setRightMotor(int speed, int direction) {
   else                    { digitalWrite(rightIN3, LOW);  digitalWrite(rightIN4, LOW);  }
 }
 
-void moveForward(int speed)  { setLeftMotor(speed, 1);  setRightMotor(speed, 1);  }
-void moveBackward(int speed) { setLeftMotor(speed, -1); setRightMotor(speed, -1); }
-
-// ── CENTER-PIVOT TURNS ────────────────────────────────────────
-// Both wheels run at equal speed in OPPOSITE directions so the
-// robot rotates exactly around its own center point.
+// Center-pivot: both wheels opposite directions — robot spins on its own center
 void pivotLeft(int speed) {
-  setLeftMotor(speed, -1);  // left wheel backward
-  setRightMotor(speed, 1);  // right wheel forward
+  setLeftMotor(speed, -1);  // left backward
+  setRightMotor(speed, 1);  // right forward
 }
 
 void pivotRight(int speed) {
-  setLeftMotor(speed, 1);   // left wheel forward
-  setRightMotor(speed, -1); // right wheel backward
+  setLeftMotor(speed, 1);   // left forward
+  setRightMotor(speed, -1); // right backward
 }
 
-// ── CLEAN STOP — no ghost current ────────────────────────────
-// Sets ENA/ENB LOW first so H-bridge output goes to 0 V,
-// then sets IN pins LOW. This prevents any residual movement.
+// Kill PWM first, then direction pins — eliminates ghost current/movement
 void stopMotors() {
-  // Kill PWM first — output drops to 0 immediately
   analogWrite(leftENA,  0);
   analogWrite(rightENB, 0);
-  // Then set direction pins LOW
   digitalWrite(leftIN1,  LOW); digitalWrite(leftIN2,  LOW);
   digitalWrite(rightIN3, LOW); digitalWrite(rightIN4, LOW);
 }
+
+void moveForward(int speed)  { setLeftMotor(speed, 1);  setRightMotor(speed, 1);  }
+void moveBackward(int speed) { setLeftMotor(speed, -1); setRightMotor(speed, -1); }
 
 // ─────────────────────────────────────────────────────────────
 // GYROSCOPE
@@ -129,26 +125,22 @@ void calibrateGyro() {
     delay(10);
   }
 
-  gyroBiasZ     = sumZ / samples;
-  gyroCalibrated = true;
-
+  gyroBiasZ = sumZ / samples;
   Serial.print("Gyro Z Bias: "); Serial.print(gyroBiasZ, 6); Serial.println(" rad/s");
   Serial.println("Calibration complete!\n");
 }
 
 void determineGyroSign() {
   Serial.println("\n========================================");
-  Serial.println("GYRO SIGN CHECK");
-  Serial.println("Pivot-left briefly to verify direction...");
+  Serial.println("GYRO SIGN CHECK — pivot-left briefly...");
   Serial.println("========================================\n");
 
   stopMotors();
-  delay(200);  // allow any residual movement to settle
+  delay(200);
 
   gyroAngle    = 0.0;
   lastGyroTime = millis();
 
-  // Use center-pivot so both wheels move equally — no net translation
   pivotLeft(100);
   unsigned long startTime = millis();
   while (millis() - startTime < 300) {
@@ -160,9 +152,8 @@ void determineGyroSign() {
     gyroAngle += ((g.gyro.z - gyroBiasZ) * 180.0 / 3.14159) * dt;
   }
 
-  // CLEAN STOP — kill PWM before touching IN pins
   stopMotors();
-  delay(300);  // let motors fully stop before reading result
+  delay(300);
 
   Serial.print("Gyro angle after pivot-left: ");
   Serial.print(gyroAngle, 2); Serial.println("°");
@@ -185,14 +176,6 @@ void updateGyroAngle() {
   lastGyroTime     = currentTime;
   float correctedZ = (g.gyro.z - gyroBiasZ) * gyroSign;
   gyroAngle       += (correctedZ * 180.0 / 3.14159) * dt;
-
-  static unsigned long lastGyroDebug = 0;
-  if (currentTime - lastGyroDebug >= 2000) {
-    lastGyroDebug = currentTime;
-    Serial.print("[GYRO] Raw Z: "); Serial.print(g.gyro.z, 6);
-    Serial.print(" | Corrected: "); Serial.print(correctedZ, 6);
-    Serial.print(" | Angle: "); Serial.print(gyroAngle, 2); Serial.println("°");
-  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -211,75 +194,46 @@ float getDistanceFromTicks(long ticks) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ROTATION CORE
+// CORE BLOCKING PIVOT
 // ─────────────────────────────────────────────────────────────
+// Resets gyro to zero then pivots to targetAngle.
+// Positive targetAngle = left, negative = right.
+// Blocks until done or timeout (5 s).
 
-// Returns true when the robot has reached targetAngle (from a fresh zero).
-// Uses center-pivot (both wheels) for true on-the-spot rotation.
-bool rotateToAngle(float targetAngle, int speed, unsigned long& rotationStartTime) {
-  unsigned long currentTime = millis();
+void blockingPivot(float targetAngle, int speed) {
+  resetTracking();
+  unsigned long startTime = millis();
 
-  // Safety timeout
-  if (currentTime - rotationStartTime > 5000) {
-    Serial.println("[TIMEOUT] Rotation timeout! Stopping.");
-    stopMotors();
-    return true;
+  while (true) {
+    updateGyroAngle();
+
+    // Safety timeout
+    if (millis() - startTime > 5000) {
+      Serial.println("[TIMEOUT] Pivot timeout!");
+      stopMotors();
+      return;
+    }
+
+    float angleDiff = targetAngle - gyroAngle;
+
+    // Debug every 500 ms
+    static unsigned long lastDbg = 0;
+    if (millis() - lastDbg >= 500) {
+      lastDbg = millis();
+      Serial.print("[PIVOT] Target: "); Serial.print(targetAngle, 1);
+      Serial.print("° | Now: ");        Serial.print(gyroAngle, 1);
+      Serial.print("° | Err: ");        Serial.println(angleDiff, 1);
+    }
+
+    if (abs(angleDiff) < 5.0) {
+      stopMotors();
+      Serial.println("[PIVOT] Done.");
+      return;
+    }
+
+    if (angleDiff > 0) pivotLeft(speed);
+    else               pivotRight(speed);
   }
-
-  float angleDiff = targetAngle - gyroAngle;
-
-  static unsigned long lastRotDebug = 0;
-  if (currentTime - lastRotDebug >= 1000) {
-    lastRotDebug = currentTime;
-    Serial.print("[ROTATE] Target: "); Serial.print(targetAngle, 1);
-    Serial.print("° | Current: "); Serial.print(gyroAngle, 1);
-    Serial.print("° | Error: "); Serial.println(angleDiff, 1);
-  }
-
-  if (abs(angleDiff) < 5.0) {
-    Serial.println("[SUCCESS] Target angle reached!");
-    // Kill PWM first, then clear IN pins — eliminates ghost pulse
-    stopMotors();
-    return true;
-  }
-
-  // Center-pivot: both wheels, equal speed, opposite directions
-  if (angleDiff > 0) pivotLeft(speed);
-  else               pivotRight(speed);
-
-  return false;
-}
-
-// Non-blocking wrapper used by the test state machine
-bool performGyroRotation(float targetAngle, int speed,
-                         unsigned long& rotationStartTime, bool& rotationStarted) {
-  if (!rotationStarted) {
-    resetTracking();
-    rotationStartTime = millis();
-    rotationStarted   = true;
-  }
-  return rotateToAngle(targetAngle, speed, rotationStartTime);
-}
-
-// ─────────────────────────────────────────────────────────────
-// REUSABLE 90° LEFT PIVOT  ← use this everywhere for left turns
-// ─────────────────────────────────────────────────────────────
-// Blocking. Resets gyro to zero, targets 90°, PWM 80.
-// Both wheels used — robot stays on the same center point.
-// Safe stop at end — no ghost motor movement.
-void performLeft90() {
-  bool          rotationStarted   = false;
-  bool          rotationCompleted = false;
-  unsigned long rotationStartTime = 0;
-
-  Serial.println("\n[TURN] Starting 90° left pivot...");
-
-  while (!rotationCompleted) {
-    updateGyroAngle();  // MUST be inside loop — drives the angle integration
-    rotationCompleted = performGyroRotation(90.0, 80, rotationStartTime, rotationStarted);
-  }
-
-  Serial.println("[TURN] 90° left pivot complete.\n");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -301,7 +255,7 @@ long readSonar(int echoPin) {
 void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
-  Serial.println("Starting Robot Diagnostics...");
+  Serial.println("Starting Robot...");
 
   setupMotors();
   Serial.println("Motors initialized!");
@@ -338,68 +292,44 @@ void setup() {
   delay(1000);
   calibrateGyro();
   determineGyroSign();
+
+  Serial.println("\n========================================");
+  Serial.println("TEST READY");
+  Serial.println("Sequence: LEFT 90° → CENTER → RIGHT 90° → CENTER");
+  Serial.println("Repeating until power off.");
+  Serial.println("========================================\n");
+  delay(1000);
 }
 
 // ─────────────────────────────────────────────────────────────
-// LOOP
+// LOOP  —  repeating pivot test
 // ─────────────────────────────────────────────────────────────
 
 void loop() {
-  unsigned long currentTime = millis();
+  static int cycle = 1;
 
-  updateGyroAngle();
+  Serial.print("\n=== CYCLE "); Serial.print(cycle); Serial.println(" ===");
 
-  // Sequential sonar polling
-  if (currentTime - prevSonarTime >= 40) {
-    prevSonarTime = currentTime;
-    distances[currentSonar] = readSonar(echoPins[currentSonar]);
-    if (++currentSonar > 4) currentSonar = 0;
-  }
+  // ── STEP 1: Pivot 90° LEFT ───────────────────────────────
+  Serial.println("[STEP 1] Pivot 90° LEFT");
+  blockingPivot(90.0, PIVOT_SPEED);
+  delay(PAUSE_BETWEEN_MS);
 
-  // ── ROTATION TEST STATE MACHINE ──────────────────────────
-  static bool          rotationStarted   = false;
-  static bool          rotationCompleted = false;
-  static unsigned long rotationStartTime = 0;
+  // ── STEP 2: Return to center (pivot 90° RIGHT from current) ─
+  Serial.println("[STEP 2] Return to center (90° RIGHT)");
+  blockingPivot(-90.0, PIVOT_SPEED);
+  delay(PAUSE_BETWEEN_MS);
 
-  if (!rotationCompleted && currentTime > 6000) {
-    if (!rotationStarted) {
-      Serial.println("\n========================================");
-      Serial.println("STARTING 90° LEFT PIVOT TEST");
-      Serial.println("Motor PWM: 80 | Both wheels | Center pivot");
-      Serial.println("========================================\n");
-    }
+  // ── STEP 3: Pivot 90° RIGHT ──────────────────────────────
+  Serial.println("[STEP 3] Pivot 90° RIGHT");
+  blockingPivot(-90.0, PIVOT_SPEED);
+  delay(PAUSE_BETWEEN_MS);
 
-    if (performGyroRotation(90.0, 80, rotationStartTime, rotationStarted)) {
-      rotationCompleted = true;
-      Serial.println("\n========================================");
-      Serial.println("ROTATION TEST RESULTS");
-      Serial.println("========================================");
-      Serial.print("Target Angle:       90.0°\n");
-      Serial.print("Final Gyro Angle:   "); Serial.print(gyroAngle, 2);                        Serial.println("°");
-      Serial.print("Left  Ticks:        "); Serial.println(leftTicks);
-      Serial.print("Right Ticks:        "); Serial.println(rightTicks);
-      Serial.print("Tick Difference:    "); Serial.println(abs(leftTicks - rightTicks));
-      Serial.print("Distance Left:      "); Serial.print(getDistanceFromTicks(leftTicks), 2);  Serial.println("cm");
-      Serial.print("Distance Right:     "); Serial.print(getDistanceFromTicks(rightTicks), 2); Serial.println("cm");
-      Serial.println("========================================\n");
+  // ── STEP 4: Return to center (pivot 90° LEFT from current) ─
+  Serial.println("[STEP 4] Return to center (90° LEFT)");
+  blockingPivot(90.0, PIVOT_SPEED);
+  delay(PAUSE_BETWEEN_MS);
 
-      // ── To add a second identical left pivot, uncomment: ──
-      // delay(1000);
-      // performLeft90();
-      // ───────────────────────────────────────────────────────
-    }
-  }
-
-  // Live status
-  static unsigned long lastPrint = 0;
-  if (currentTime - lastPrint >= 1000) {
-    lastPrint = currentTime;
-    Serial.print("[TEST] Ticks L:");  Serial.print(leftTicks);
-    Serial.print(" R:");              Serial.print(rightTicks);
-    Serial.print(" | Gyro:");         Serial.print(gyroAngle, 1);
-    Serial.print("° | ");
-    if      (!rotationStarted)   Serial.println("Waiting for startup");
-    else if (!rotationCompleted) Serial.println("Rotating");
-    else                         Serial.println("Complete");
-  }
+  Serial.print("=== CYCLE "); Serial.print(cycle); Serial.println(" COMPLETE ===\n");
+  cycle++;
 }
